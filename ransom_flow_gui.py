@@ -11,9 +11,9 @@ from watchdog.events import FileSystemEventHandler
 from datetime import datetime
 
 # === CONFIGURATION - CHANGE THESE PATHS AS NEEDED === #
-EMAIL_SENDER = "hithusp01@gmail.com"
-EMAIL_PASSWORD = "kvyj tirp amdj jefz"  # App password if 2FA is enabled
-EMAIL_RECEIVER = "hithusp2004@gmail.com"
+EMAIL_SENDER = "" # add email of sender
+EMAIL_PASSWORD = ""  # App password if 2FA is enabled and passkey
+EMAIL_RECEIVER = "" # add mail of reciver
 # ===================================================== #
 
 class RansomwareHandler(FileSystemEventHandler):
