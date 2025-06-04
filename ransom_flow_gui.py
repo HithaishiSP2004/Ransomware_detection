@@ -1,63 +1,158 @@
 import sys
+# import base64
 import os
-import time
+# import time
 import shutil
 import smtplib
+# import hashlib
+import math
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from PyQt5 import QtCore, QtWidgets, QtGui
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from cryptography.fernet import Fernet, InvalidToken
 from datetime import datetime
 
+
 # === CONFIGURATION - CHANGE THESE PATHS AS NEEDED === #
-EMAIL_SENDER = "" # add email of sender
-EMAIL_PASSWORD = ""  # App password if 2FA is enabled and passkey
-EMAIL_RECEIVER = "" # add mail of reciver
+EMAIL_SENDER = "" # gmail of sender
+EMAIL_PASSWORD = ""  # App password if 2FA is enabled app passcode
+EMAIL_RECEIVER = ""# reciver
 # ===================================================== #
 
 class RansomwareHandler(FileSystemEventHandler):
-    def __init__(self, window):
-        super().__init__()
+    def __init__(self, window, key=None):
         self.window = window
-        self.encrypted_files = set()
-        self.modified_files = {}  # filename -> last checked timestamp
-        self.suspicious_modifications = {}  # filename -> number of suspicious events
+        self.key = key
+        self.suspicious_exts = ['.locked', '.encrypted', '.crypt', '.enc']
+        self.ignored_extensions = ['.log', '.dll', '.sys', '.tmp', '.pyc']
+        self.known_ransom_filenames = ['readme.txt', 'decrypt_instructions.txt', 'how_to_decrypt.html']
+        self.recent_alerts = set()  # Track alerted filenames to avoid duplicates
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        self._check_file(event.src_path, created=True)
 
     def on_modified(self, event):
         if event.is_directory:
             return
-        filepath = event.src_path
-        filename = os.path.basename(filepath)
+        self._check_file(event.src_path, created=False)
 
-        # Only process if file not already flagged
-        if filepath in self.encrypted_files:
+    def _check_file(self, filepath, created=False):
+        filename = os.path.basename(filepath).lower()
+        ext = os.path.splitext(filename)[1].lower()
+
+        if ext in self.ignored_extensions:
+            return  # Ignore irrelevant files
+
+        # Only alert once per file regardless of created/modified
+        if filename in self.recent_alerts:
             return
 
-        # Check if file size stabilizes (meaning encryption may be done)
-        if self._is_file_encrypted(filepath):
-            if filepath not in self.encrypted_files:
-                self.encrypted_files.add(filepath)
-                alert_msg = f"[ALERT] Possible ransomware encrypted file detected: {filename}"
-                self.window.show_alert(alert_msg)
-                self.window.send_email("Ransomware Alert - Encryption Detected", alert_msg)
-                self.window.backup_all()
+        # 1. Detect by suspicious extension (highest priority)
+        if any(s_ext in filename for s_ext in self.suspicious_exts):
+            self._trigger_alert(
+                f"[ALERT - {self._now()}] Suspicious encrypted extension: {filename}",
+                "Ransomware Alert - File Extension",
+                filename
+            )
+            return
 
-    def _is_file_encrypted(self, path, wait_time=3):
+        # 2. Detect ransom note by name and content
+        if filename in self.known_ransom_filenames or filename.endswith((".txt", ".html")):
+            if self._contains_ransom_note(filepath):
+                self._trigger_alert(
+                    f"[ALERT - {self._now()}] Possible ransom note: {filename}",
+                    "Ransomware Alert - Ransom Note",
+                    filename
+                )
+                return
+
+        # 3. Detect encrypted content (entropy + unreadable + optional Fernet)
+        if self._looks_encrypted(filepath):
+            action = "created" if created else "modified"
+            self._trigger_alert(
+                f"[ALERT - {self._now()}] Encrypted file {action}: {filename}",
+                "Ransomware Alert - Encrypted Content",
+                filename
+            )
+
+    def _looks_encrypted(self, filepath):
         try:
-            size1 = os.path.getsize(path)
-            time.sleep(wait_time)
-            size2 = os.path.getsize(path)
-            return size1 == size2 and size1 > 0  # size stable and file not empty
-        except Exception:
-            return False
+            with open(filepath, "rb") as f:
+                data = f.read(2048)
+                entropy = self._calculate_entropy(data)
+
+            if entropy > 7.5:
+                return True  # Likely encrypted or compressed
+
+            try:
+                decoded = data.decode('utf-8')
+                if any(ord(c) > 127 for c in decoded):  # Contains non-ASCII
+                    return True
+            except UnicodeDecodeError:
+                return True
+
+            if self.key:
+                try:
+                    fernet = Fernet(self.key)
+                    fernet.decrypt(data)
+                    return False
+                except InvalidToken:
+                    return True
+
+        except Exception as e:
+            print(f"[ERROR] Could not check encryption for {filepath}: {e}")
+        return False
+
+    def _contains_ransom_note(self, filepath):
+        try:
+            with open(filepath, 'r', errors='ignore') as f:
+                content = f.read().lower()
+            keywords = ['your files', 'ransom', 'bitcoin', 'decrypt', 'pay', 'key', 'victim', 'restore']
+            return any(k in content for k in keywords)
+        except PermissionError:
+            print(f"[PERMISSION DENIED] Cannot read file: {filepath}")
+        except Exception as e:
+            print(f"[ERROR] Failed to read ransom note from {filepath}: {e}")
+        return False
+
+    def _calculate_entropy(self, data):
+        if not data:
+            return 0
+        byte_count = [0] * 256
+        for byte in data:
+            byte_count[byte] += 1
+        entropy = 0
+        for count in byte_count:
+            if count:
+                p = count / len(data)
+                entropy -= p * math.log2(p)
+        return entropy
+
+    def _trigger_alert(self, message, subject, filename):
+        if filename in self.recent_alerts:
+            return  # Already alerted for this file
+        self.recent_alerts.add(filename)
+
+        print(message)
+        self.window.show_alert(message)
+        self.window.send_email(subject, message)
+        self.window.backup_all()
+
+    def _now(self):
+        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
 
 
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ransom Flow - Ransomware Defense")
-        self.resize(1000, 650)  # Bigger window
+        self.resize(1000, 650)
         self.setStyleSheet("""
             QWidget {
                 background-color: #0d1117;
@@ -100,7 +195,6 @@ class MainWindow(QtWidgets.QWidget):
         title.setStyleSheet("font-size: 28px; font-weight: bold; color: #58a6ff; margin-bottom: 15px;")
         layout.addWidget(title)
 
-        # Button layout for better UI
         btn_layout = QtWidgets.QHBoxLayout()
 
         btn_monitor = QtWidgets.QPushButton("Add Folder/Disk to Monitor")
@@ -117,7 +211,7 @@ class MainWindow(QtWidgets.QWidget):
 
         layout.addLayout(btn_layout)
 
-        btn_add_backup = QtWidgets.QPushButton("Add Folder to Back Up")
+        btn_add_backup = QtWidgets.QPushButton("Add Folder to Be Backed Up")
         btn_add_backup.clicked.connect(self.add_backup_folder)
         layout.addWidget(btn_add_backup)
 
@@ -148,7 +242,7 @@ class MainWindow(QtWidgets.QWidget):
             self.alert_box.append(f"[INFO] Added to monitor: {folder}")
 
     def add_backup_folder(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Add Folder to Back Up")
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Add Folder to Be Backed Up")
         if folder:
             self.backup_folders.append(folder)
             self.folder_list.addItem(f"Backup Source: {folder}")
@@ -187,16 +281,24 @@ class MainWindow(QtWidgets.QWidget):
                 self.alert_box.append(f"[WARNING] Path not found: {folder}")
 
         self.observer.start()
-        self.alert_box.append("[INFO] Monitoring started.")
+        self.alert_box.append(f"[START] Monitoring started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     def stop_monitoring(self):
         if self.observer:
             self.observer.stop()
             self.observer.join()
             self.observer = None
-            self.alert_box.append("[INFO] Monitoring stopped.")
+            self.alert_box.append(f"[STOP] Monitoring stopped at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         else:
             self.alert_box.append("[INFO] Monitoring is not running.")
+            
+    def save_log_file(self):
+        logs = self.alert_box.toPlainText()
+        log_path = os.path.join(os.getcwd(), f"ransomware_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+        with open(log_path, "w") as f:
+            f.write(logs)
+        self.alert_box.append(f"[LOG] Log file saved at: {log_path}")
+       
 
     def send_email(self, subject, body):
         try:
@@ -204,49 +306,45 @@ class MainWindow(QtWidgets.QWidget):
             msg['Subject'] = subject
             msg['From'] = formataddr(("Ransom Flow Alert", EMAIL_SENDER))
             msg['To'] = EMAIL_RECEIVER
-            msg['Reply-To'] = EMAIL_SENDER
-            msg['X-Priority'] = '1'  # High priority
-            msg['X-MSMail-Priority'] = 'High'
-            msg['Importance'] = 'High'
 
             server = smtplib.SMTP('smtp.gmail.com', 587)
             server.starttls()
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
+            server.sendmail(EMAIL_SENDER, [EMAIL_RECEIVER], msg.as_string())
             server.quit()
-
-            self.alert_box.append("[INFO] Email alert sent successfully.")
+            
+            self.alert_box.append(f"[EMAIL] Alert sent to {EMAIL_RECEIVER}")
         except Exception as e:
-            self.alert_box.append(f"[ERROR] Failed to send email: {e}")
+            self.alert_box.append(f"[ERROR] Failed to send email: {str(e)}")
 
     def backup_all(self):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        for folder in self.backup_folders:
-            if self.local_backup_path:
-                dest = os.path.join(self.local_backup_path, f"backup_{timestamp}_{os.path.basename(folder)}")
-                try:
-                    shutil.copytree(folder, dest)
-                    self.alert_box.append(f"[INFO] Local backup successful: {dest}")
-                except Exception as e:
-                    self.alert_box.append(f"[ERROR] Local backup failed: {e}")
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        if not self.backup_folders:
+            self.alert_box.append("[WARNING] No folders added for backup.")
+            return
 
-            if self.cloud_backup_path:
-                dest = os.path.join(self.cloud_backup_path, f"backup_{timestamp}_{os.path.basename(folder)}")
-                try:
-                    shutil.copytree(folder, dest)
-                    self.alert_box.append(f"[INFO] Cloud backup successful: {dest}")
-                except Exception as e:
-                    self.alert_box.append(f"[ERROR] Cloud backup failed: {e}")
+        if not self.local_backup_path and not self.cloud_backup_path:
+            self.alert_box.append("[WARNING] No backup destination set.")
+            return
 
-    def closeEvent(self, event):
-        if self.observer:
-            self.observer.stop()
-            self.observer.join()
-        event.accept()
+        for source in self.backup_folders:
+            if not os.path.exists(source):
+                self.alert_box.append(f"[WARNING] Backup source does not exist: {source}")
+                continue
 
-if __name__ == '__main__':
+            for destination in [self.local_backup_path, self.cloud_backup_path]:
+                if destination:
+                    try:
+                        dest_folder_name = os.path.basename(source.rstrip(os.sep)) + "_" + timestamp
+                        final_dest = os.path.join(destination, dest_folder_name)
+                        shutil.copytree(source, final_dest)
+                        self.alert_box.append(f"[BACKUP] {source} ➜ {final_dest}")
+                    except Exception as e:
+                        self.alert_box.append(f"[ERROR] Failed to back up {source} to {destination}: {e}")
+
+
+if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    app.setStyle("Fusion")
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
