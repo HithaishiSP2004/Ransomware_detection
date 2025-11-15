@@ -60,3 +60,4 @@ if __name__ == "__main__":
         simulate_attack(folder)
     else:
         print("❌ Invalid folder path.")
+
