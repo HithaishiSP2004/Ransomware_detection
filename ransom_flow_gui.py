@@ -17,7 +17,7 @@ from datetime import datetime
 
 # === CONFIGURATION - CHANGE THESE PATHS AS NEEDED === #
 EMAIL_SENDER = "" # gmail of sender
-EMAIL_PASSWORD = ""  # App password if 2FA is enabled app passcode
+EMAIL_PASSWORD = ""  # App password if 2FA is enabled app passcode you can get from your google account
 EMAIL_RECEIVER = ""# reciver
 # ===================================================== #
 
@@ -348,4 +348,5 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
+
 
