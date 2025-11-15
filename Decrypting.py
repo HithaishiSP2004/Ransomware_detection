@@ -16,3 +16,4 @@ if __name__ == "__main__":
     encrypted_file = input("Enter the path of the encrypted file (e.g. file.txt.locked): ")
     decrypted_file = input("Enter the output path for decrypted file (e.g. file.txt): ")
     decrypt_file(encrypted_file, decrypted_file, key)
+
